@@ -4,9 +4,9 @@ pydantic
 pypdf
 pdf2image
 pytesseract
-opencv-python
 numpy
 pillow
 python-multipart
 PyMuPDF
 pdfplumber
+opencv-python-headless==4.10.0.84
