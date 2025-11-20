@@ -1,137 +1,69 @@
-# app/signature_check.py
-
 import io
-import re
-from typing import Any, Dict
+from typing import Any, Dict, List
 
-import cv2
-import numpy as np
-import pytesseract
-from pypdf import PdfReader
-
-
-def _clean_text(s: str) -> str:
-    if not s:
-        return ""
-    return re.sub(r"\s+", " ", s).strip()
-
-
-def _detect_digital_signatures(pdf_bytes: bytes) -> Dict[str, Any]:
-    """
-    Lightweight detection of digital signatures.
-
-    We do two things:
-      1) Use pypdf to look for /Sig fields in the AcroForm.
-      2) Fallback: scan the raw bytes for common signature markers.
-    """
-
-    details = []
-    has_sig = False
-
-    # --- 1. pypdf-based check ---
-    try:
-        reader = PdfReader(io.BytesIO(pdf_bytes))
-        root = reader.trailer.get("/Root", {})
-        acro_form = root.get("/AcroForm")
-        if acro_form:
-            fields = acro_form.get("/Fields", [])
-            for field in fields:
-                try:
-                    f = field.get_object()
-                except Exception:
-                    continue
-
-                field_type = f.get("/FT")
-                if field_type == "/Sig":
-                    has_sig = True
-                    name = f.get("/T")
-                    sig_dict = f.get("/V")
-                    sig_info = {}
-
-                    if sig_dict:
-                        sig_obj = sig_dict.get_object()
-                        for key in ["/Name", "/Reason", "/Location", "/M", "/Filter", "/SubFilter"]:
-                            if key in sig_obj:
-                                sig_info[key.strip("/")] = str(sig_obj.get(key))
-                    details.append(
-                        {
-                            "field_name": str(name) if name else None,
-                            "info": sig_info,
-                        }
-                    )
-    except Exception:
-        # We don't want signature parsing to kill the service
-        pass
-
-    # --- 2. Raw-bytes heuristic ---
-    raw_text = pdf_bytes.decode("latin-1", errors="ignore")
-    if not has_sig:
-        if re.search(r"/Type\s*/Sig", raw_text) or "Adobe.PPKLite" in raw_text:
-            has_sig = True
-            details.append(
-                {
-                    "field_name": None,
-                    "info": {"note": "Signature markers found in raw PDF bytes"},
-                }
-            )
-
-    return {
-        "digital_signatures_detected": 1 if has_sig else 0,
-        "details": details,
-    }
-
-
-def _detect_wet_signatures(pdf_bytes: bytes) -> Dict[str, Any]:
-    """
-    VERY simple wet-signature heuristic:
-    - Render pages to images via pypdf's built-in extraction (if any).
-    - Use OpenCV to look for dark, ink-like strokes in bottom part of the page.
-
-    This is *not* robust or production-grade, but it gives you a placeholder
-    structure you can extend later.
-    """
-    try:
-        reader = PdfReader(io.BytesIO(pdf_bytes))
-    except Exception:
-        return {"wet_signatures_detected": 0, "details": []}
-
-    detected = []
-    page_index = 0
-
-    for page in reader.pages:
-        page_index += 1
-
-        # pypdf cannot render pages; this is just a stub.
-        # In a real setup you would:
-        #   - use PyMuPDF to render each page to an image
-        #   - run OpenCV analysis on that image
-        #
-        # Since PyMuPDF is already in your project for OCR, it's better
-        # to reuse that path instead of trying to get images from pypdf.
-        #
-        # For now we return zero and keep the structure ready.
-        pass
-
-    return {
-        "wet_signatures_detected": len(detected),
-        "details": detected,
-    }
+from PyPDF2 import PdfReader
 
 
 def analyze_signatures(pdf_bytes: bytes) -> Dict[str, Any]:
     """
-    Public entry point used by main.py.
+    Very lightweight digital-signature detection using PyPDF2.
 
-    Returns:
-      {
-        "digital_signatures": { ... },
-        "wet_signature": { ... }
-      }
+    We look for annotation fields of type /Sig. This is not a full
+    cryptographic validation (that would require heavier libraries),
+    but it tells us whether the PDF contains signature fields.
     """
-    digital = _detect_digital_signatures(pdf_bytes)
-    wet = _detect_wet_signatures(pdf_bytes)
-
-    return {
-        "digital_signatures": digital,
-        "wet_signature": wet,
+    result: Dict[str, Any] = {
+        "digital_signatures": [],
+        "wet_signature": {
+            "wet_signatures_detected": 0,
+            "details": [],
+        },
     }
+
+    try:
+        reader = PdfReader(io.BytesIO(pdf_bytes))
+    except Exception as e:
+        # If PDF is malformed, just return empty signature info
+        result["error"] = f"Failed to parse PDF in signature check: {e}"
+        return result
+
+    digital_sigs: List[Dict[str, Any]] = []
+
+    for page_index, page in enumerate(reader.pages, start=1):
+        annots = page.get("/Annots")
+        if not annots:
+            continue
+
+        for annot_ref in annots:
+            try:
+                annot = annot_ref.get_object()
+            except Exception:
+                continue
+
+            subtype = annot.get("/Subtype")
+            field_type = annot.get("/FT")
+
+            # Typical pattern for signature fields
+            if str(subtype) == "/Widget" and str(field_type) == "/Sig":
+                sig_dict = annot.get("/V")
+                sig_info = {
+                    "page_no": page_index,
+                    "field_name": str(annot.get("/T", "")),
+                }
+
+                if sig_dict:
+                    sig_info["reason"] = str(sig_dict.get("/Reason", ""))
+                    sig_info["location"] = str(sig_dict.get("/Location", ""))
+                    sig_info["contact_info"] = str(sig_dict.get("/ContactInfo", ""))
+                    sig_info["signer"] = str(sig_dict.get("/Name", ""))
+
+                digital_sigs.append(sig_info)
+
+    result["digital_signatures"] = digital_sigs
+
+    # Wet signatures (handwritten) would require image analysis.
+    # For now we just return zero.
+    result["wet_signature"]["wet_signatures_detected"] = 0
+    result["wet_signature"]["details"] = []
+
+    return result

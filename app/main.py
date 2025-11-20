@@ -1,88 +1,72 @@
-# app/main.py
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-from typing import Optional, List
-import base64
-import hashlib
+from fastapi import FastAPI, File, UploadFile, Form
+from fastapi.responses import JSONResponse
+from typing import Any, Dict
 
-from .extract_all import extract_all_text_and_tables
+from .extract_all import extract_text_and_tables
 from .signature_check import analyze_signatures
 
+import traceback
 
-class SignatureResult(BaseModel):
-    digital_signatures: list
-    wet_signature: dict
-
-
-class ExtractionResult(BaseModel):
-    pages: list
-    tables: list
-
-
-class AnalyzePdfResponse(BaseModel):
-    status: str
-    file_hash: str
-    extraction: ExtractionResult
-    signatures: SignatureResult
-
-
-# 1️⃣  Define the FastAPI app FIRST
 app = FastAPI(title="DP PDF Service")
-
-# 2️⃣  Then attach middleware
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
 
 @app.get("/health")
-async def health():
+def health() -> Dict[str, str]:
     return {"status": "ok"}
 
 
-def _hash_bytes(data: bytes) -> str:
-    return hashlib.sha256(data).hexdigest()
-
-
-@app.post("/analyze_pdf", response_model=AnalyzePdfResponse)
+@app.post("/analyze_pdf")
 async def analyze_pdf(
-    file: UploadFile = File(None),
-    pdf_base64: str = Form(None),
-    ocr_threshold_chars: int = Form(800),
-):
-    # Basic validation
-    if not file and not pdf_base64:
-        raise HTTPException(
-            status_code=400,
-            detail="No PDF provided (file or pdf_base64 is required).",
-        )
+    file: UploadFile = File(...),
+    ocr_threshold_chars: int = Form(1000),
+) -> JSONResponse:
+    """
+    Accepts a PDF file, performs:
+      - text + table extraction (with OCR fallback)
+      - lightweight signature analysis
 
-    if file:
+    Returns a combined JSON payload.
+    """
+    try:
+        if file.content_type not in ("application/pdf", "application/octet-stream"):
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "status": "error",
+                    "message": f"Expected a PDF file, got content_type={file.content_type}",
+                },
+            )
+
         pdf_bytes = await file.read()
-    else:
-        try:
-            pdf_bytes = base64.b64decode(pdf_base64)
-        except Exception:
-            raise HTTPException(status_code=400, detail="Invalid base64 PDF data.")
 
-    file_hash = _hash_bytes(pdf_bytes)
+        extraction = extract_text_and_tables(pdf_bytes, ocr_threshold_chars)
+        signatures = analyze_signatures(pdf_bytes)
 
-    # Extraction
-    extraction = extract_all_text_and_tables(
-        pdf_bytes, ocr_threshold_chars=ocr_threshold_chars
-    )
+        # optional: build a flat full_text string for downstream Now Assist skill
+        full_text_parts = [p.get("text", "") for p in extraction.get("pages", [])]
+        full_text = "\n\n".join(t for t in full_text_parts if t)
 
-    # Signature analysis
-    signatures = analyze_signatures(pdf_bytes)
+        response: Dict[str, Any] = {
+            "status": "ok",
+            "file_name": file.filename,
+            "file_size_bytes": len(pdf_bytes),
+            "file_hash": None,  # you can add SHA256 if you want
+            "extraction": extraction,
+            "signatures": signatures,
+            "full_text": full_text,
+        }
 
-    return {
-        "status": "ok",
-        "file_hash": file_hash,
-        "extraction": extraction,
-        "signatures": signatures,
-    }
+        return JSONResponse(status_code=200, content=response)
+
+    except Exception as e:
+        # Log full traceback to Render logs
+        tb = traceback.format_exc()
+        print("ERROR in /analyze_pdf:", tb)
+
+        return JSONResponse(
+            status_code=500,
+            content={
+                "status": "error",
+                "message": f"Internal error while analyzing PDF: {str(e)}",
+            },
+        )

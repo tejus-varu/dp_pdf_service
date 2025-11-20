@@ -1,12 +1,8 @@
 fastapi
-uvicorn
-pydantic
-pypdf
-pdf2image
-pytesseract
-numpy
-pillow
-python-multipart
-PyMuPDF
+uvicorn[standard]
+pymupdf              # import fitz
 pdfplumber
-opencv-python-headless==4.10.0.84
+pytesseract
+Pillow               # PIL
+PyPDF2               # simple digital-signature detection
+python-multipart     # REQUIRED for file uploads in FastAPI
