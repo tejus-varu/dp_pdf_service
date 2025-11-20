@@ -1,6 +1,7 @@
 import io
 import re
 from typing import Any, Dict
+from pathlib import Path
 
 import fitz  # PyMuPDF
 import pdfplumber
@@ -9,14 +10,15 @@ import cv2
 import pytesseract
 import platform
 
+# NOTE:
+# Do NOT hardcode Windows Tesseract paths in cloud environments.
+# Render already has tesseract-ocr installed from the Dockerfile.
+# The following block is safe for local Windows but ignored in Linux.
 
-# --- POINT pytesseract to your Windows install ----
-# Adjust this path if your Tesseract is somewhere else.
 if platform.system() == "Windows":
     pytesseract.pytesseract.tesseract_cmd = (
         r"C:\Users\TejusReddy\AppData\Local\Programs\Tesseract-OCR\tesseract.exe"
     )
-# ---------------------------------------------------
 
 
 def _clean_text(s: str) -> str:
@@ -42,16 +44,7 @@ def _ocr_page_image(pix) -> str:
 
 def extract_text_and_tables(pdf_bytes: bytes, ocr_threshold_chars: int = 1000) -> Dict[str, Any]:
     """
-    For each page:
-      - Try native text (vector).
-      - If too little text, OCR the page image.
-    Tables:
-      - Use pdfplumber.extract_tables() (best effort).
-    Returns:
-      {
-        "pages": [ { "page_no": int, "text": str } ],
-        "tables": [ { "page_no": int, "rows": [[...]], "cols": int, "bbox": [x0,y0,x1,y1] } ]
-      }
+    Extracts text, OCR text, and tables from a PDF given as bytes.
     """
     out: Dict[str, Any] = {"pages": [], "tables": []}
 
@@ -62,7 +55,7 @@ def extract_text_and_tables(pdf_bytes: bytes, ocr_threshold_chars: int = 1000) -
         text = page.get_text("text") or ""
         text = _clean_text(text)
 
-        # If very little text, assume scanned → OCR
+        # Fallback to OCR
         if len(text) < ocr_threshold_chars:
             mat = fitz.Matrix(2, 2)  # zoom a bit for OCR
             pix = page.get_pixmap(matrix=mat, alpha=False)
@@ -94,3 +87,16 @@ def extract_text_and_tables(pdf_bytes: bytes, ocr_threshold_chars: int = 1000) -
                 continue
 
     return out
+
+
+# ==========================================================
+# NEW: Wrapper function expected by main.py & Render
+# ==========================================================
+
+def extract_all_text_and_tables(pdf_path: str, ocr_threshold_chars: int = 1000) -> Dict[str, Any]:
+    """
+    Wrapper expected by FastAPI and main.py.
+    Loads PDF from a file path → passes bytes to existing function.
+    """
+    pdf_bytes = Path(pdf_path).read_bytes()
+    return extract_text_and_tables(pdf_bytes, ocr_threshold_chars=ocr_threshold_chars)
